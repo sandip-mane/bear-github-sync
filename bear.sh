@@ -107,7 +107,6 @@ rewrite_images_for_export() {
     echo "$1" | sed -E "s|!\[([^]]*)\]\(([^/)][^)]*)\)|![\1](../attachments/${2}/\2)|g"
 }
 
-# Parse frontmatter once, return all lines between --- delimiters
 extract_frontmatter() {
     awk 'BEGIN{c=0} /^---$/{c++; if(c<=2) next} c==1{print}' "$1"
 }
@@ -176,15 +175,14 @@ cmd_export() {
     manifest=$(load_manifest)
     local new_count=0 updated_count=0 deleted_count=0 unchanged_count=0 skipped_count=0
 
-    # Associative array for O(1) UUID lookup in deletion sync
-    declare -A seen_uuids
-
-    local used_slugs_file
+    # Temp files for tracking seen UUIDs and used slugs
+    local seen_uuids_file used_slugs_file
+    seen_uuids_file=$(mktemp)
     used_slugs_file=$(mktemp)
-    trap "rm -f '$used_slugs_file'" EXIT
+    trap "rm -f '$seen_uuids_file' '$used_slugs_file'" EXIT
 
     while IFS=$'\t' read -r uuid title created_ts modified_ts encrypted tags; do
-        seen_uuids["$uuid"]=1
+        echo "$uuid" >> "$seen_uuids_file"
 
         if [[ "$encrypted" == "1" ]]; then
             warn "Skipping encrypted note: $title"
@@ -228,8 +226,13 @@ cmd_export() {
         fi
 
         if [[ "$DRY_RUN" == "true" ]]; then
-            [[ -z "$manifest_modified" ]] && log "[DRY RUN] Would create: $filename" && new_count=$((new_count + 1)) \
-                || { log "[DRY RUN] Would update: $filename"; updated_count=$((updated_count + 1)); }
+            if [[ -z "$manifest_modified" ]]; then
+                log "[DRY RUN] Would create: $filename"
+                new_count=$((new_count + 1))
+            else
+                log "[DRY RUN] Would update: $filename"
+                updated_count=$((updated_count + 1))
+            fi
             continue
         fi
 
@@ -253,15 +256,19 @@ cmd_export() {
             --arg m "$modified" --argjson a "$attach_json" \
             '.notes[$u] = {filename: $f, checksum: $c, modified: $m, attachments: $a}')
 
-        [[ -z "$manifest_modified" ]] && new_count=$((new_count + 1)) || updated_count=$((updated_count + 1))
+        if [[ -z "$manifest_modified" ]]; then
+            new_count=$((new_count + 1))
+        else
+            updated_count=$((updated_count + 1))
+        fi
     done < <(query_bear_notes)
 
     # Deletion sync
-    if [[ ${#seen_uuids[@]} -eq 0 ]]; then
+    if [[ ! -s "$seen_uuids_file" ]]; then
         warn "No notes seen — skipping deletion sync"
     else
         for muuid in $(echo "$manifest" | jq -r '.notes | keys[]'); do
-            [[ -n "${seen_uuids[$muuid]:-}" ]] && continue
+            grep -qx "$muuid" "$seen_uuids_file" && continue
             local del_filename
             del_filename=$(echo "$manifest" | jq -r --arg u "$muuid" '.notes[$u].filename')
             if [[ "$DRY_RUN" == "true" ]]; then
@@ -302,7 +309,9 @@ cmd_import() {
     manifest=$(load_manifest)
     local new_count=0 updated_count=0 deleted_count=0 unchanged_count=0
 
-    declare -A seen_uuids
+    local seen_uuids_file
+    seen_uuids_file=$(mktemp)
+    trap "rm -f '$seen_uuids_file'" EXIT
 
     for mdfile in "$NOTES_DIR"/*.md; do
         [[ -f "$mdfile" ]] || continue
@@ -325,7 +334,7 @@ cmd_import() {
         checksum=$(file_checksum "$mdfile")
         if [[ -n "$uuid" ]]; then
             manifest_checksum=$(echo "$manifest" | jq -r --arg u "$uuid" '.notes[$u].checksum // ""')
-            seen_uuids["$uuid"]=1
+            echo "$uuid" >> "$seen_uuids_file"
         fi
 
         if [[ -n "$manifest_checksum" && "$checksum" == "$manifest_checksum" ]]; then
@@ -334,8 +343,13 @@ cmd_import() {
         fi
 
         if [[ "$DRY_RUN" == "true" ]]; then
-            [[ -z "$manifest_checksum" ]] && log "[DRY RUN] Would create in Bear: $title" && new_count=$((new_count + 1)) \
-                || { log "[DRY RUN] Would update in Bear: $title"; updated_count=$((updated_count + 1)); }
+            if [[ -z "$manifest_checksum" ]]; then
+                log "[DRY RUN] Would create in Bear: $title"
+                new_count=$((new_count + 1))
+            else
+                log "[DRY RUN] Would update in Bear: $title"
+                updated_count=$((updated_count + 1))
+            fi
             continue
         fi
 
@@ -373,11 +387,11 @@ cmd_import() {
     done
 
     # Deletion sync
-    if [[ ${#seen_uuids[@]} -eq 0 ]]; then
+    if [[ ! -s "$seen_uuids_file" ]]; then
         warn "No notes seen — skipping deletion sync"
     else
         for muuid in $(echo "$manifest" | jq -r '.notes | keys[]'); do
-            [[ -n "${seen_uuids[$muuid]:-}" ]] && continue
+            grep -qx "$muuid" "$seen_uuids_file" && continue
             local del_title
             del_title=$(echo "$manifest" | jq -r --arg u "$muuid" '.notes[$u].filename // "unknown"')
             if [[ "$DRY_RUN" == "true" ]]; then
