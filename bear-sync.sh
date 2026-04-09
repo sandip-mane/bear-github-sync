@@ -435,15 +435,15 @@ case "$COMMAND" in
     init)    cmd_init ;;
     export)  cmd_export ;;
     import)  cmd_import ;;
-    sync)    cmd_export && cmd_import ;;
+    sync)    cmd_import && cmd_export ;;
     help|*)
         echo "Usage: bear-sync.sh <command> [--dry-run]"
         echo ""
         echo "Commands:"
-        echo "  init      Create repo structure and empty manifest"
+        echo "  sync      Full sync (import remote changes, then export local)"
         echo "  export    Export Bear notes to repo (Bear → GitHub)"
         echo "  import    Import notes from repo to Bear (GitHub → Bear)"
-        echo "  sync      Export then import"
+        echo "  init      Create repo structure and empty manifest"
         echo ""
         echo "Options:"
         echo "  --dry-run  Show what would change without making changes"
