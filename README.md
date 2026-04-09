@@ -29,23 +29,23 @@ gh repo create my-bear-notes --private
 git remote set-url origin git@github.com:<your-username>/my-bear-notes.git
 
 # Run first export
-./bear-sync.sh export
+./bear.sh export
 ```
 
 ## Usage
 
 ```bash
 # Full sync — pull remote changes into Bear, then push Bear changes to repo
-./bear-sync.sh sync
+./bear.sh sync
 
 # One-way operations
-./bear-sync.sh export    # Bear → GitHub
-./bear-sync.sh import    # GitHub → Bear
+./bear.sh export    # Bear → GitHub
+./bear.sh import    # GitHub → Bear
 
 # Preview changes without doing anything
-./bear-sync.sh sync --dry-run
-./bear-sync.sh export --dry-run
-./bear-sync.sh import --dry-run
+./bear.sh sync --dry-run
+./bear.sh export --dry-run
+./bear.sh import --dry-run
 ```
 
 ## How It Works
@@ -78,7 +78,7 @@ my-bear-notes/
 │   └── my-note/
 │       └── screenshot.png
 ├── .manifest.json      # Sync state (auto-managed, gitignored)
-├── bear-sync.sh        # The sync script
+├── bear.sh        # The sync script
 └── README.md
 ```
 

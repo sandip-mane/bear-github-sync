@@ -421,7 +421,7 @@ case "$COMMAND" in
     import)  cmd_import ;;
     sync)    cmd_import && cmd_export ;;
     help|*)
-        echo "Usage: bear-sync.sh <command> [--dry-run]"
+        echo "Usage: bear.sh <command> [--dry-run]"
         echo ""
         echo "Commands:"
         echo "  sync      Full sync (import remote changes, then export local)"
