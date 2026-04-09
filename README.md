@@ -46,6 +46,9 @@ git remote set-url origin git@github.com:<your-username>/my-bear-notes.git
 ./bear.sh sync --dry-run
 ./bear.sh export --dry-run
 ./bear.sh import --dry-run
+
+# Update bear.sh to the latest version
+./bear.sh update
 ```
 
 ## How It Works
