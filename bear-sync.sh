@@ -167,25 +167,10 @@ export_attachments() {
 
 # --- Commands ---
 
-cmd_init() {
-    log "Initializing..."
-    [[ -d "$REPO_DIR/.git" ]] || err "Not a git repo: $REPO_DIR"
-    mkdir -p "$NOTES_DIR" "$ATTACH_DIR"
-    [[ -f "$MANIFEST" ]] || { save_manifest '{"notes":{}}'; log "Created empty manifest"; }
-
-    for pattern in ".bear-sync.conf" ".manifest.json"; do
-        if [[ ! -f "$REPO_DIR/.gitignore" ]] || ! grep -q "$pattern" "$REPO_DIR/.gitignore"; then
-            echo "$pattern" >> "$REPO_DIR/.gitignore"
-        fi
-    done
-
-    log "Init complete. Run 'bear-sync.sh export' to export your notes."
-}
-
 cmd_export() {
     log "Starting export..."
     [[ -f "$BEAR_DB" ]] || err "Bear database not found at: $BEAR_DB"
-    [[ -d "$NOTES_DIR" ]] || err "Notes directory not found. Run 'bear-sync.sh init' first."
+    mkdir -p "$NOTES_DIR" "$ATTACH_DIR"
 
     local manifest
     manifest=$(load_manifest)
@@ -432,7 +417,6 @@ for arg in "$@"; do
 done
 
 case "$COMMAND" in
-    init)    cmd_init ;;
     export)  cmd_export ;;
     import)  cmd_import ;;
     sync)    cmd_import && cmd_export ;;
@@ -443,7 +427,6 @@ case "$COMMAND" in
         echo "  sync      Full sync (import remote changes, then export local)"
         echo "  export    Export Bear notes to repo (Bear → GitHub)"
         echo "  import    Import notes from repo to Bear (GitHub → Bear)"
-        echo "  init      Create repo structure and empty manifest"
         echo ""
         echo "Options:"
         echo "  --dry-run  Show what would change without making changes"

@@ -28,8 +28,7 @@ cd my-bear-notes
 gh repo create my-bear-notes --private
 git remote set-url origin git@github.com:<your-username>/my-bear-notes.git
 
-# Initialize and run first export
-./bear-sync.sh init
+# Run first export
 ./bear-sync.sh export
 ```
 
