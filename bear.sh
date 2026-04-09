@@ -436,6 +436,18 @@ case "$COMMAND" in
     export)  cmd_export ;;
     import)  cmd_import ;;
     sync)    cmd_import && cmd_export ;;
+    update)
+        log "Updating bear.sh from latest release..."
+        tmp=$(mktemp)
+        if curl -fsSL "https://raw.githubusercontent.com/sandip-mane/bear-github-sync/main/bear.sh" -o "$tmp"; then
+            mv "$tmp" "$SCRIPT_DIR/bear.sh"
+            chmod +x "$SCRIPT_DIR/bear.sh"
+            log "Updated successfully."
+        else
+            rm -f "$tmp"
+            err "Failed to download update."
+        fi
+        ;;
     help|*)
         echo "Usage: bear.sh <command> [--dry-run]"
         echo ""
@@ -443,6 +455,7 @@ case "$COMMAND" in
         echo "  sync      Full sync (import remote changes, then export local)"
         echo "  export    Export Bear notes to repo (Bear → GitHub)"
         echo "  import    Import notes from repo to Bear (GitHub → Bear)"
+        echo "  update    Update bear.sh to the latest version"
         echo ""
         echo "Options:"
         echo "  --dry-run  Show what would change without making changes"
