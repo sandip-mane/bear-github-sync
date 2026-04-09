@@ -286,7 +286,9 @@ cmd_export() {
     if [[ "$DRY_RUN" == "false" ]]; then
         save_manifest "$manifest"
         cd "$REPO_DIR"
-        git add -A
+        # Only stage notes/, attachments/, and manifest — never use 'git add -A'
+        # which would delete repo files not present on this machine
+        git add notes/ attachments/ .manifest.json
         if ! git diff --cached --quiet; then
             git commit -m "bear export: $new_count new, $updated_count updated, $deleted_count deleted"
             git remote get-url origin > /dev/null 2>&1 && git push && log "Pushed to origin"
