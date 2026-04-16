@@ -9,14 +9,10 @@ BEAR_DB="${BEAR_DB:-$HOME/Library/Group Containers/9K33E3U3T4.net.shinyfrog.bear
 BEAR_FILES="${BEAR_FILES:-$HOME/Library/Group Containers/9K33E3U3T4.net.shinyfrog.bear/Application Data/Local Files/Note Images}"
 REPO_DIR="${REPO_DIR:-$SCRIPT_DIR}"
 
-# Load overrides if config file exists
 [[ -f "$SCRIPT_DIR/.bear-sync.conf" ]] && source "$SCRIPT_DIR/.bear-sync.conf"
 
-MANIFEST="$REPO_DIR/.manifest.json"
 NOTES_DIR="$REPO_DIR/notes"
 ATTACH_DIR="$REPO_DIR/attachments"
-DRY_RUN=false
-
 COREDATA_EPOCH=978307200
 
 # --- Helper Functions ---
@@ -35,28 +31,31 @@ coredata_to_iso() {
     date -r "$(echo "$ts + $COREDATA_EPOCH" | bc | cut -d. -f1)" +"%Y-%m-%dT%H:%M:%S" 2>/dev/null || echo "unknown"
 }
 
-file_checksum() {
-    shasum -a 256 "$1" | cut -d' ' -f1
-}
-
-load_manifest() {
-    if [[ -f "$MANIFEST" ]]; then cat "$MANIFEST"; else echo '{"notes":{}}'; fi
-}
-
-save_manifest() {
-    local tmp
-    tmp=$(mktemp "$MANIFEST.XXXXXX")
-    echo "$1" | jq '.' > "$tmp" && mv "$tmp" "$MANIFEST" || { rm -f "$tmp"; err "Failed to save manifest"; }
-}
-
 urlencode() {
     python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.stdin.read().rstrip('\n'),safe=''))" <<< "$1"
 }
 
 bear_is_running() { pgrep -x "Bear" > /dev/null 2>&1; }
-log() { echo "[bear-sync] $*"; }
-warn() { echo "[bear-sync] WARNING: $*" >&2; }
-err() { echo "[bear-sync] ERROR: $*" >&2; exit 1; }
+
+ensure_bear_running() {
+    if bear_is_running; then return 0; fi
+    log "Bear is not running. Opening Bear..."
+    open -a "Bear"
+    local waited=0
+    while ! bear_is_running; do
+        sleep 1
+        waited=$((waited + 1))
+        if (( waited >= 15 )); then
+            err "Bear did not start within 15 seconds"
+        fi
+    done
+    sleep 2
+    log "Bear is ready"
+}
+
+log() { echo "[bear] $*"; }
+warn() { echo "[bear] WARNING: $*" >&2; }
+err() { echo "[bear] ERROR: $*" >&2; exit 1; }
 
 # --- SQL Queries ---
 
@@ -150,7 +149,6 @@ export_attachments() {
         cp "$src" "$dest_dir/$filename"
     done < <(query_note_files "$note_uuid")
 
-    # Clean up orphaned attachments
     if [[ -d "$dest_dir" ]]; then
         local current_files
         current_files=$(query_note_files "$note_uuid" | cut -f2)
@@ -167,39 +165,19 @@ export_attachments() {
 # --- Commands ---
 
 cmd_export() {
-    log "Starting export..."
+    log "Exporting..."
     [[ -f "$BEAR_DB" ]] || err "Bear database not found at: $BEAR_DB"
     mkdir -p "$NOTES_DIR" "$ATTACH_DIR"
 
-    local manifest
-    manifest=$(load_manifest)
-    local new_count=0 updated_count=0 deleted_count=0 unchanged_count=0 skipped_count=0
+    local written_files used_slugs
+    written_files=$(mktemp)
+    used_slugs=$(mktemp)
+    trap "rm -f '$written_files' '$used_slugs'" EXIT
 
-    # Temp files for tracking seen UUIDs and used slugs
-    local seen_uuids_file used_slugs_file
-    seen_uuids_file=$(mktemp)
-    used_slugs_file=$(mktemp)
-    trap "rm -f '$seen_uuids_file' '$used_slugs_file'" EXIT
-
+    local count=0
     while IFS=$'\t' read -r uuid title created_ts modified_ts encrypted tags; do
-        echo "$uuid" >> "$seen_uuids_file"
-
         if [[ "$encrypted" == "1" ]]; then
             warn "Skipping encrypted note: $title"
-            skipped_count=$((skipped_count + 1))
-            continue
-        fi
-
-        local created modified
-        created=$(coredata_to_iso "$created_ts")
-        modified=$(coredata_to_iso "$modified_ts")
-
-        local manifest_modified
-        manifest_modified=$(echo "$manifest" | jq -r --arg u "$uuid" '.notes[$u].modified // ""')
-
-        if [[ "$manifest_modified" == "$modified" ]]; then
-            unchanged_count=$((unchanged_count + 1))
-            echo "$manifest" | jq -r --arg u "$uuid" '.notes[$u].filename // ""' | sed 's/\.md$//' >> "$used_slugs_file"
             continue
         fi
 
@@ -207,34 +185,19 @@ cmd_export() {
         slug=$(slugify "$title")
         [[ -z "$slug" ]] && slug="untitled"
 
-        # Collision detection
-        while grep -qx "$slug" "$used_slugs_file" 2>/dev/null; do
+        while grep -qx "$slug" "$used_slugs" 2>/dev/null; do
             local i=2 base_slug="$slug"
-            while grep -qx "${base_slug}-${i}" "$used_slugs_file" 2>/dev/null; do i=$((i + 1)); done
+            while grep -qx "${base_slug}-${i}" "$used_slugs" 2>/dev/null; do i=$((i + 1)); done
             slug="${base_slug}-${i}"
         done
-        echo "$slug" >> "$used_slugs_file"
+        echo "$slug" >> "$used_slugs"
 
         local filename="${slug}.md"
+        echo "$filename" >> "$written_files"
 
-        # Handle title renames
-        local old_filename
-        old_filename=$(echo "$manifest" | jq -r --arg u "$uuid" '.notes[$u].filename // ""')
-        if [[ -n "$old_filename" && "$old_filename" != "$filename" && "$DRY_RUN" == "false" ]]; then
-            rm -f "$NOTES_DIR/$old_filename"
-            rm -rf "$ATTACH_DIR/${old_filename%.md}"
-        fi
-
-        if [[ "$DRY_RUN" == "true" ]]; then
-            if [[ -z "$manifest_modified" ]]; then
-                log "[DRY RUN] Would create: $filename"
-                new_count=$((new_count + 1))
-            else
-                log "[DRY RUN] Would update: $filename"
-                updated_count=$((updated_count + 1))
-            fi
-            continue
-        fi
+        local created modified
+        created=$(coredata_to_iso "$created_ts")
+        modified=$(coredata_to_iso "$modified_ts")
 
         local text body frontmatter
         text=$(query_note_text "$uuid")
@@ -244,129 +207,106 @@ cmd_export() {
         frontmatter=$(build_frontmatter "$uuid" "$title" "$tags" "$created" "$modified")
 
         printf '%s\n%s\n' "$frontmatter" "$body" > "$NOTES_DIR/$filename"
-
         export_attachments "$uuid" "$slug"
-
-        local checksum attach_json="[]"
-        checksum=$(file_checksum "$NOTES_DIR/$filename")
-        [[ -d "$ATTACH_DIR/$slug" ]] && attach_json=$(ls "$ATTACH_DIR/$slug" 2>/dev/null | jq -R . | jq -sc .)
-
-        manifest=$(echo "$manifest" | jq \
-            --arg u "$uuid" --arg f "$filename" --arg c "$checksum" \
-            --arg m "$modified" --argjson a "$attach_json" \
-            '.notes[$u] = {filename: $f, checksum: $c, modified: $m, attachments: $a}')
-
-        if [[ -z "$manifest_modified" ]]; then
-            new_count=$((new_count + 1))
-        else
-            updated_count=$((updated_count + 1))
-        fi
+        count=$((count + 1))
     done < <(query_bear_notes)
 
-    # Deletion sync
-    if [[ ! -s "$seen_uuids_file" ]]; then
-        warn "No notes seen — skipping deletion sync"
+    # Remove files not in Bear
+    for f in "$NOTES_DIR"/*.md; do
+        [[ -f "$f" ]] || continue
+        grep -qx "$(basename "$f")" "$written_files" || rm -f "$f"
+    done
+
+    # Remove orphaned attachment dirs
+    for d in "$ATTACH_DIR"/*/; do
+        [[ -d "$d" ]] || continue
+        grep -qx "$(basename "$d").md" "$written_files" || rm -rf "$d"
+    done
+
+    cd "$REPO_DIR"
+    git add notes/ attachments/
+    [[ -f .manifest.json ]] && git rm -f .manifest.json 2>/dev/null || true
+    if ! git diff --cached --quiet; then
+        git commit -m "bear export: $count notes"
+        git remote get-url origin > /dev/null 2>&1 && git push && log "Pushed to origin"
     else
-        for muuid in $(echo "$manifest" | jq -r '.notes | keys[]'); do
-            grep -qx "$muuid" "$seen_uuids_file" && continue
-            local del_filename
-            del_filename=$(echo "$manifest" | jq -r --arg u "$muuid" '.notes[$u].filename')
-            if [[ "$DRY_RUN" == "true" ]]; then
-                log "[DRY RUN] Would delete: $del_filename"
-            else
-                rm -f "$NOTES_DIR/$del_filename"
-                rm -rf "$ATTACH_DIR/${del_filename%.md}"
-                manifest=$(echo "$manifest" | jq --arg u "$muuid" 'del(.notes[$u])')
-                log "Deleted: $del_filename"
-            fi
-            deleted_count=$((deleted_count + 1))
-        done
+        log "No changes to commit"
     fi
-
-    if [[ "$DRY_RUN" == "false" ]]; then
-        save_manifest "$manifest"
-        cd "$REPO_DIR"
-        # Only stage notes/, attachments/, and manifest — never use 'git add -A'
-        # which would delete repo files not present on this machine
-        git add notes/ attachments/ .manifest.json
-        if ! git diff --cached --quiet; then
-            git commit -m "bear export: $new_count new, $updated_count updated, $deleted_count deleted"
-            git remote get-url origin > /dev/null 2>&1 && git push && log "Pushed to origin"
-        else
-            log "No changes to commit"
-        fi
-    fi
-
-    log "Export complete: $new_count new, $updated_count updated, $deleted_count deleted, $unchanged_count unchanged, $skipped_count skipped"
+    log "Exported $count notes"
 }
 
 cmd_import() {
-    log "Starting import..."
-    bear_is_running || err "Bear is not running. Please open Bear and try again."
+    log "Importing..."
+    ensure_bear_running
 
     cd "$REPO_DIR"
     git remote get-url origin > /dev/null 2>&1 && { git pull --rebase 2>/dev/null || git pull; }
 
-    local manifest
-    manifest=$(load_manifest)
-    local new_count=0 updated_count=0 deleted_count=0 unchanged_count=0
-
-    local seen_uuids_file
-    seen_uuids_file=$(mktemp)
-    trap "rm -f '$seen_uuids_file'" EXIT
+    # Collect UUIDs from repo files
+    local repo_uuids
+    repo_uuids=$(mktemp)
+    trap "rm -f '$repo_uuids'" EXIT
 
     for mdfile in "$NOTES_DIR"/*.md; do
         [[ -f "$mdfile" ]] || continue
+        local fm uuid
+        fm=$(extract_frontmatter "$mdfile")
+        uuid=$(parse_frontmatter_field "$fm" "uuid")
+        [[ -n "$uuid" ]] && echo "$uuid" >> "$repo_uuids"
+    done
 
-        local filename slug
+    # Find Bear notes not in repo
+    local to_trash
+    to_trash=$(mktemp)
+    while IFS=$'\t' read -r uuid title _rest; do
+        [[ -s "$repo_uuids" ]] && grep -qx "$uuid" "$repo_uuids" && continue
+        printf '%s\t%s\n' "$uuid" "$title" >> "$to_trash"
+    done < <(query_bear_notes)
+
+    local trashed=0
+    if [[ -s "$to_trash" ]]; then
+        log "The following notes will be trashed from Bear:"
+        while IFS=$'\t' read -r _uuid title; do
+            log "  - $title"
+        done < "$to_trash"
+        printf "[bear] Proceed? [y/N] "
+        read -r confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            while IFS=$'\t' read -r uuid title; do
+                open "bear://x-callback-url/trash?id=${uuid}" 2>/dev/null
+                sleep 1
+                log "Trashed: $title"
+                trashed=$((trashed + 1))
+            done < "$to_trash"
+        else
+            log "Skipped trashing notes"
+        fi
+    fi
+    rm -f "$to_trash"
+
+    # Import all repo notes into Bear
+    local imported=0
+    for mdfile in "$NOTES_DIR"/*.md; do
+        [[ -f "$mdfile" ]] || continue
+
+        local filename slug fm uuid title tags
         filename=$(basename "$mdfile")
         slug="${filename%.md}"
-
-        # Parse frontmatter once
-        local fm
         fm=$(extract_frontmatter "$mdfile")
-        local uuid title tags
         uuid=$(parse_frontmatter_field "$fm" "uuid")
         title=$(parse_frontmatter_field "$fm" "title")
         tags=$(parse_frontmatter_tags "$fm")
 
-        [[ -z "$uuid" ]] && warn "No UUID in frontmatter for $filename, treating as new note"
-
-        local checksum manifest_checksum=""
-        checksum=$(file_checksum "$mdfile")
+        # Trash existing note so we can recreate it
         if [[ -n "$uuid" ]]; then
-            manifest_checksum=$(echo "$manifest" | jq -r --arg u "$uuid" '.notes[$u].checksum // ""')
-            echo "$uuid" >> "$seen_uuids_file"
-        fi
-
-        if [[ -n "$manifest_checksum" && "$checksum" == "$manifest_checksum" ]]; then
-            unchanged_count=$((unchanged_count + 1))
-            continue
-        fi
-
-        if [[ "$DRY_RUN" == "true" ]]; then
-            if [[ -z "$manifest_checksum" ]]; then
-                log "[DRY RUN] Would create in Bear: $title"
-                new_count=$((new_count + 1))
-            else
-                log "[DRY RUN] Would update in Bear: $title"
-                updated_count=$((updated_count + 1))
-            fi
-            continue
+            open "bear://x-callback-url/trash?id=${uuid}" 2>/dev/null
+            sleep 1
         fi
 
         local body
         body=$(strip_frontmatter "$mdfile")
         body=$(rewrite_images_for_import "$body" "$slug")
 
-        # Trash old note if updating
-        if [[ -n "$uuid" && -n "$manifest_checksum" ]]; then
-            log "Trashing old version: $title"
-            open "bear://x-callback-url/trash?id=${uuid}" 2>/dev/null
-            sleep 1
-        fi
-
-        # Create note via x-callback-url
         local encoded_title encoded_tags encoded_body
         encoded_title=$(urlencode "$title")
         encoded_tags=$(urlencode "$tags")
@@ -374,68 +314,20 @@ cmd_import() {
         open "bear://x-callback-url/create?title=${encoded_title}&text=${encoded_body}&tags=${encoded_tags}" 2>/dev/null
         sleep 1.5
         log "Imported: $title"
-
-        if [[ -n "$uuid" && -z "$manifest_checksum" ]]; then
-            manifest=$(echo "$manifest" | jq \
-                --arg u "$uuid" --arg f "$filename" --arg c "$checksum" \
-                '.notes[$u] = {filename: $f, checksum: $c}')
-            new_count=$((new_count + 1))
-        elif [[ -n "$uuid" && -n "$manifest_checksum" ]]; then
-            manifest=$(echo "$manifest" | jq --arg u "$uuid" 'del(.notes[$u])')
-            updated_count=$((updated_count + 1))
-        else
-            new_count=$((new_count + 1))
-        fi
+        imported=$((imported + 1))
     done
 
-    # Deletion sync
-    if [[ ! -s "$seen_uuids_file" ]]; then
-        warn "No notes seen — skipping deletion sync"
-    else
-        for muuid in $(echo "$manifest" | jq -r '.notes | keys[]'); do
-            grep -qx "$muuid" "$seen_uuids_file" && continue
-            local del_title
-            del_title=$(echo "$manifest" | jq -r --arg u "$muuid" '.notes[$u].filename // "unknown"')
-            if [[ "$DRY_RUN" == "true" ]]; then
-                log "[DRY RUN] Would trash in Bear: $del_title (UUID: $muuid)"
-            else
-                open "bear://x-callback-url/trash?id=${muuid}" 2>/dev/null
-                sleep 1
-                manifest=$(echo "$manifest" | jq --arg u "$muuid" 'del(.notes[$u])')
-                log "Trashed in Bear: $del_title"
-            fi
-            deleted_count=$((deleted_count + 1))
-        done
-    fi
-
-    if [[ "$DRY_RUN" == "false" ]]; then
-        save_manifest "$manifest"
-        cd "$REPO_DIR"
-        git add .manifest.json
-        if ! git diff --cached --quiet; then
-            git commit -m "bear import: updated manifest"
-            git remote get-url origin > /dev/null 2>&1 && git push
-        fi
-    fi
-
-    log "Import complete: $new_count new, $updated_count updated, $deleted_count deleted, $unchanged_count unchanged"
+    log "Import complete: $imported imported, $trashed trashed"
 }
 
 # --- Argument Parsing ---
 
 COMMAND="${1:-help}"
 shift || true
-for arg in "$@"; do
-    case "$arg" in
-        --dry-run) DRY_RUN=true ;;
-        *) warn "Unknown argument: $arg" ;;
-    esac
-done
 
 case "$COMMAND" in
     export)  cmd_export ;;
     import)  cmd_import ;;
-    sync)    cmd_import && cmd_export ;;
     update)
         log "Updating bear.sh from latest release..."
         tmp=$(mktemp)
@@ -449,16 +341,12 @@ case "$COMMAND" in
         fi
         ;;
     help|*)
-        echo "Usage: bear.sh <command> [--dry-run]"
+        echo "Usage: bear.sh <command>"
         echo ""
         echo "Commands:"
-        echo "  sync      Full sync (import remote changes, then export local)"
-        echo "  export    Export Bear notes to repo (Bear → GitHub)"
-        echo "  import    Import notes from repo to Bear (GitHub → Bear)"
+        echo "  export    Export Bear notes to repo and push (Bear → GitHub)"
+        echo "  import    Pull from remote and import into Bear (GitHub → Bear)"
         echo "  update    Update bear.sh to the latest version"
-        echo ""
-        echo "Options:"
-        echo "  --dry-run  Show what would change without making changes"
         exit 0
         ;;
 esac

@@ -1,15 +1,14 @@
 # bear-github-sync
 
-Sync your [Bear](https://bear.app) notes to a GitHub repo as Markdown. Bidirectional, with attachments.
+Sync your [Bear](https://bear.app) notes to a GitHub repo as Markdown. One-way per command, with attachments.
 
 ## What It Does
 
-- Exports Bear notes as `.md` files with YAML frontmatter (title, tags, dates)
-- Imports markdown files back into Bear
+- **Export**: dumps all Bear notes as `.md` files with YAML frontmatter and pushes to GitHub
+- **Import**: pulls from GitHub and recreates notes in Bear; asks before trashing notes that aren't in the repo
 - Syncs attachments (images, PDFs, etc.)
-- Tracks changes — only syncs what's different
-- Handles deletions in both directions
-- Commits and pushes automatically
+
+Each command is one-directional, so notes can never be accidentally deleted by a misfired bidirectional sync.
 
 ## Requirements
 
@@ -35,25 +34,16 @@ git remote set-url origin git@github.com:<your-username>/my-bear-notes.git
 ## Usage
 
 ```bash
-# Full sync — pull remote changes into Bear, then push Bear changes to repo
-./bear.sh sync
-
-# One-way operations
 ./bear.sh export    # Bear → GitHub
-./bear.sh import    # GitHub → Bear
-
-# Preview changes without doing anything
-./bear.sh sync --dry-run
-./bear.sh export --dry-run
-./bear.sh import --dry-run
-
-# Update bear.sh to the latest version
-./bear.sh update
+./bear.sh import    # GitHub → Bear (asks before trashing notes not in repo)
+./bear.sh update    # Update bear.sh to the latest version
 ```
+
+Import auto-opens Bear if it isn't running.
 
 ## How It Works
 
-**Export** reads Bear's SQLite database (read-only), writes each note as a `.md` file with frontmatter, copies attachments, and pushes to GitHub.
+**Export** reads Bear's SQLite database (read-only), writes each note as a `.md` file with frontmatter, copies attachments, deletes any repo files no longer in Bear, and pushes to GitHub.
 
 ```yaml
 ---
@@ -66,11 +56,7 @@ modified: 2024-03-20T14:22:00
 Your note content here...
 ```
 
-**Import** pulls from GitHub, compares checksums against a manifest, and creates/updates notes in Bear via `bear://x-callback-url`.
-
-**Sync** runs import first (so remote changes land in Bear), then export (so local Bear changes go to the repo).
-
-A `.manifest.json` tracks sync state so unchanged notes are skipped.
+**Import** pulls from GitHub, lists any Bear notes that don't have a corresponding file in the repo and asks for confirmation before trashing them, then recreates each repo note in Bear via `bear://x-callback-url`.
 
 ## Repo Structure
 
@@ -80,8 +66,7 @@ my-bear-notes/
 ├── attachments/        # Images/files organized by note
 │   └── my-note/
 │       └── screenshot.png
-├── .manifest.json      # Sync state (auto-managed, gitignored)
-├── bear.sh        # The sync script
+├── bear.sh             # The sync script
 └── README.md
 ```
 
@@ -97,10 +82,9 @@ REPO_DIR="$HOME/Work/my-bear-notes"
 
 ## Limitations
 
-- Bear must be open for import to work
 - Encrypted notes are skipped during export
-- Updated notes on import are trashed and recreated (Bear assigns new UUIDs, reconciled on next export)
-- Conflict strategy: import = repo wins, export = Bear wins
+- Import trashes and recreates every note in Bear, so notes get new UUIDs (reconciled on the next export)
+- Conflict strategy: export = Bear wins, import = repo wins
 
 ## License
 
