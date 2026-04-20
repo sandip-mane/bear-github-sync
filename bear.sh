@@ -174,7 +174,7 @@ cmd_export() {
     used_slugs=$(mktemp)
     trap "rm -f '$written_files' '$used_slugs'" EXIT
 
-    local count=0
+    local changed=0 unchanged=0 removed=0
     while IFS=$'\t' read -r uuid title created_ts modified_ts encrypted tags; do
         if [[ "$encrypted" == "1" ]]; then
             warn "Skipping encrypted note: $title"
@@ -195,11 +195,23 @@ cmd_export() {
         local filename="${slug}.md"
         echo "$filename" >> "$written_files"
 
-        local created modified
-        created=$(coredata_to_iso "$created_ts")
+        local modified
         modified=$(coredata_to_iso "$modified_ts")
 
-        local text body frontmatter
+        local existing_file="$NOTES_DIR/$filename"
+        if [[ -f "$existing_file" ]]; then
+            local existing_fm existing_uuid existing_modified
+            existing_fm=$(extract_frontmatter "$existing_file")
+            existing_uuid=$(parse_frontmatter_field "$existing_fm" "uuid")
+            existing_modified=$(parse_frontmatter_field "$existing_fm" "modified")
+            if [[ "$existing_uuid" == "$uuid" && "$existing_modified" == "$modified" ]]; then
+                unchanged=$((unchanged + 1))
+                continue
+            fi
+        fi
+
+        local created text body frontmatter
+        created=$(coredata_to_iso "$created_ts")
         text=$(query_note_text "$uuid")
         body=$(strip_bear_title_line "$text")
         body=$(strip_tag_markers "$body")
@@ -208,13 +220,16 @@ cmd_export() {
 
         printf '%s\n%s\n' "$frontmatter" "$body" > "$NOTES_DIR/$filename"
         export_attachments "$uuid" "$slug"
-        count=$((count + 1))
+        changed=$((changed + 1))
     done < <(query_bear_notes)
 
     # Remove files not in Bear
     for f in "$NOTES_DIR"/*.md; do
         [[ -f "$f" ]] || continue
-        grep -qx "$(basename "$f")" "$written_files" || rm -f "$f"
+        if ! grep -qx "$(basename "$f")" "$written_files"; then
+            rm -f "$f"
+            removed=$((removed + 1))
+        fi
     done
 
     # Remove orphaned attachment dirs
@@ -227,12 +242,12 @@ cmd_export() {
     git add notes/ attachments/
     [[ -f .manifest.json ]] && git rm -f .manifest.json 2>/dev/null || true
     if ! git diff --cached --quiet; then
-        git commit -m "bear export: $count notes"
+        git commit -m "bear export: $changed changed, $removed removed"
         git remote get-url origin > /dev/null 2>&1 && git push && log "Pushed to origin"
     else
         log "No changes to commit"
     fi
-    log "Exported $count notes"
+    log "Export complete: $changed changed, $unchanged unchanged, $removed removed"
 }
 
 cmd_import() {
@@ -242,28 +257,54 @@ cmd_import() {
     cd "$REPO_DIR"
     git remote get-url origin > /dev/null 2>&1 && { git pull --rebase 2>/dev/null || git pull; }
 
-    # Collect UUIDs from repo files
-    local repo_uuids
+    local bear_state new_notes changed_notes repo_uuids to_trash to_create
+    bear_state=$(mktemp)
+    new_notes=$(mktemp)
+    changed_notes=$(mktemp)
     repo_uuids=$(mktemp)
-    trap "rm -f '$repo_uuids'" EXIT
-
-    for mdfile in "$NOTES_DIR"/*.md; do
-        [[ -f "$mdfile" ]] || continue
-        local fm uuid
-        fm=$(extract_frontmatter "$mdfile")
-        uuid=$(parse_frontmatter_field "$fm" "uuid")
-        [[ -n "$uuid" ]] && echo "$uuid" >> "$repo_uuids"
-    done
-
-    # Find Bear notes not in repo
-    local to_trash
     to_trash=$(mktemp)
-    while IFS=$'\t' read -r uuid title _rest; do
-        [[ -s "$repo_uuids" ]] && grep -qx "$uuid" "$repo_uuids" && continue
-        printf '%s\t%s\n' "$uuid" "$title" >> "$to_trash"
+    to_create=$(mktemp)
+    trap "rm -f '$bear_state' '$new_notes' '$changed_notes' '$repo_uuids' '$to_trash' '$to_create'" EXIT
+
+    # Snapshot Bear state: uuid \t modified_iso \t title
+    while IFS=$'\t' read -r uuid title _created modified_ts encrypted _tags; do
+        [[ "$encrypted" == "1" ]] && continue
+        local modified_iso
+        modified_iso=$(coredata_to_iso "$modified_ts")
+        printf '%s\t%s\t%s\n' "$uuid" "$modified_iso" "$title" >> "$bear_state"
     done < <(query_bear_notes)
 
-    local trashed=0
+    # Categorize repo files into NEW / CHANGED / UNCHANGED
+    local unchanged=0
+    for mdfile in "$NOTES_DIR"/*.md; do
+        [[ -f "$mdfile" ]] || continue
+        local fm uuid title modified
+        fm=$(extract_frontmatter "$mdfile")
+        uuid=$(parse_frontmatter_field "$fm" "uuid")
+        title=$(parse_frontmatter_field "$fm" "title")
+        modified=$(parse_frontmatter_field "$fm" "modified")
+        [[ -n "$uuid" ]] && echo "$uuid" >> "$repo_uuids"
+
+        local bear_modified
+        bear_modified=$(grep -E "^${uuid}"$'\t' "$bear_state" 2>/dev/null | cut -f2 | head -1)
+
+        if [[ -z "$bear_modified" ]]; then
+            printf '%s\t%s\t%s\t%s\n' "$modified" "$uuid" "$title" "$mdfile" >> "$new_notes"
+        elif [[ "$bear_modified" == "$modified" ]]; then
+            unchanged=$((unchanged + 1))
+        else
+            printf '%s\t%s\t%s\t%s\n' "$modified" "$uuid" "$title" "$mdfile" >> "$changed_notes"
+        fi
+    done
+
+    # Bear notes not in repo -> REMOVED
+    while IFS=$'\t' read -r uuid _mod title; do
+        grep -qx "$uuid" "$repo_uuids" 2>/dev/null && continue
+        printf '%s\t%s\n' "$uuid" "$title" >> "$to_trash"
+    done < "$bear_state"
+
+    # Prompt: trash REMOVED
+    local proceed_trash=false trashed=0
     if [[ -s "$to_trash" ]]; then
         log "The following notes will be trashed from Bear:"
         while IFS=$'\t' read -r _uuid title; do
@@ -272,38 +313,65 @@ cmd_import() {
         printf "[bear] Proceed? [y/N] "
         read -r confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            while IFS=$'\t' read -r uuid title; do
-                open "bear://x-callback-url/trash?id=${uuid}" 2>/dev/null
-                sleep 1
-                log "Trashed: $title"
-                trashed=$((trashed + 1))
-            done < "$to_trash"
+            proceed_trash=true
         else
             log "Skipped trashing notes"
         fi
     fi
-    rm -f "$to_trash"
 
-    # Import all repo notes into Bear
-    local imported=0
-    for mdfile in "$NOTES_DIR"/*.md; do
-        [[ -f "$mdfile" ]] || continue
+    # Prompt: overwrite CHANGED
+    local proceed_overwrite=false
+    if [[ -s "$changed_notes" ]]; then
+        log "The following notes will be overwritten in Bear:"
+        while IFS=$'\t' read -r _mod _uuid title _file; do
+            log "  - $title"
+        done < "$changed_notes"
+        printf "[bear] Proceed? [y/N] "
+        read -r confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            proceed_overwrite=true
+        else
+            log "Skipped overwriting notes"
+            : > "$changed_notes"
+        fi
+    fi
 
-        local filename slug fm uuid title tags
+    # Execute: trash REMOVED
+    if $proceed_trash; then
+        while IFS=$'\t' read -r uuid title; do
+            open "bear://x-callback-url/trash?id=${uuid}&show_window=no" 2>/dev/null
+            sleep 1
+            log "Trashed: $title"
+            trashed=$((trashed + 1))
+        done < "$to_trash"
+    fi
+
+    # Execute: trash CHANGED (before recreating)
+    if $proceed_overwrite; then
+        while IFS=$'\t' read -r _mod uuid _title _file; do
+            open "bear://x-callback-url/trash?id=${uuid}&show_window=no" 2>/dev/null
+            sleep 1
+        done < "$changed_notes"
+    fi
+
+    local new_count=0 overwritten=0
+    [[ -s "$new_notes" ]] && new_count=$(wc -l < "$new_notes" | tr -d ' ')
+    [[ -s "$changed_notes" ]] && overwritten=$(wc -l < "$changed_notes" | tr -d ' ')
+
+    # Create NEW + (approved) CHANGED in ascending modified order
+    # Ordering note: Bear sorts by modification date (newest first). Processing
+    # oldest-first means the most-recently-modified note gets the newest "now"
+    # timestamp, preserving the relative order shown in Bear's sidebar.
+    cat "$new_notes" "$changed_notes" 2>/dev/null | sort > "$to_create"
+
+    while IFS=$'\t' read -r _mod _uuid title mdfile; do
+        [[ -z "$mdfile" ]] && continue
+
+        local filename slug fm tags body
         filename=$(basename "$mdfile")
         slug="${filename%.md}"
         fm=$(extract_frontmatter "$mdfile")
-        uuid=$(parse_frontmatter_field "$fm" "uuid")
-        title=$(parse_frontmatter_field "$fm" "title")
         tags=$(parse_frontmatter_tags "$fm")
-
-        # Trash existing note so we can recreate it
-        if [[ -n "$uuid" ]]; then
-            open "bear://x-callback-url/trash?id=${uuid}" 2>/dev/null
-            sleep 1
-        fi
-
-        local body
         body=$(strip_frontmatter "$mdfile")
         body=$(rewrite_images_for_import "$body" "$slug")
 
@@ -311,13 +379,12 @@ cmd_import() {
         encoded_title=$(urlencode "$title")
         encoded_tags=$(urlencode "$tags")
         encoded_body=$(urlencode "$body")
-        open "bear://x-callback-url/create?title=${encoded_title}&text=${encoded_body}&tags=${encoded_tags}" 2>/dev/null
+        open "bear://x-callback-url/create?title=${encoded_title}&text=${encoded_body}&tags=${encoded_tags}&show_window=no&open_note=no" 2>/dev/null
         sleep 1.5
         log "Imported: $title"
-        imported=$((imported + 1))
-    done
+    done < "$to_create"
 
-    log "Import complete: $imported imported, $trashed trashed"
+    log "Import complete: $new_count new, $overwritten overwritten, $trashed trashed, $unchanged unchanged"
 }
 
 # --- Argument Parsing ---

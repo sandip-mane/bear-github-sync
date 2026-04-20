@@ -4,8 +4,8 @@ Sync your [Bear](https://bear.app) notes to a GitHub repo as Markdown. One-way p
 
 ## What It Does
 
-- **Export**: dumps all Bear notes as `.md` files with YAML frontmatter and pushes to GitHub
-- **Import**: pulls from GitHub and recreates notes in Bear; asks before trashing notes that aren't in the repo
+- **Export**: dumps all Bear notes as `.md` files with YAML frontmatter and pushes to GitHub; skips notes unchanged since the last export
+- **Import**: pulls from GitHub and syncs notes to Bear; skips unchanged notes and asks before trashing removed notes or overwriting changed ones
 - Syncs attachments (images, PDFs, etc.)
 
 Each command is one-directional, so notes can never be accidentally deleted by a misfired bidirectional sync.
@@ -35,7 +35,7 @@ git remote set-url origin git@github.com:<your-username>/my-bear-notes.git
 
 ```bash
 ./bear.sh export    # Bear → GitHub
-./bear.sh import    # GitHub → Bear (asks before trashing notes not in repo)
+./bear.sh import    # GitHub → Bear (asks before trashing or overwriting notes)
 ./bear.sh update    # Update bear.sh to the latest version
 ```
 
@@ -43,7 +43,7 @@ Import auto-opens Bear if it isn't running.
 
 ## How It Works
 
-**Export** reads Bear's SQLite database (read-only), writes each note as a `.md` file with frontmatter, copies attachments, deletes any repo files no longer in Bear, and pushes to GitHub.
+**Export** reads Bear's SQLite database (read-only), writes each changed note as a `.md` file with frontmatter, copies attachments, deletes any repo files no longer in Bear, and pushes to GitHub. Notes whose `modified` timestamp already matches the repo are left untouched.
 
 ```yaml
 ---
@@ -56,7 +56,7 @@ modified: 2024-03-20T14:22:00
 Your note content here...
 ```
 
-**Import** pulls from GitHub, lists any Bear notes that don't have a corresponding file in the repo and asks for confirmation before trashing them, then recreates each repo note in Bear via `bear://x-callback-url`.
+**Import** pulls from GitHub, compares each repo note's `modified` timestamp against Bear, and classifies notes as new / changed / unchanged / removed. It asks for confirmation before trashing removed notes, and separately before overwriting changed ones. Only new and (approved) changed notes are recreated via `bear://x-callback-url`, oldest-first to preserve Bear's sidebar order. Unchanged notes are left alone.
 
 ## Repo Structure
 
@@ -83,7 +83,7 @@ REPO_DIR="$HOME/Work/my-bear-notes"
 ## Limitations
 
 - Encrypted notes are skipped during export
-- Import trashes and recreates every note in Bear, so notes get new UUIDs (reconciled on the next export)
+- Import trashes and recreates new/changed notes, so those notes get new UUIDs (reconciled on the next export); unchanged notes keep their UUIDs
 - Conflict strategy: export = Bear wins, import = repo wins
 
 ## License
